@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>BOM 多批次智能比對工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .drop-zone { border: 2px dashed #cbd5e1; transition: all 0.3s; }
+        .drop-zone.active { border-color: #3b82f6; background: #eff6ff; }
+        .matrix-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+        .matrix-table th, .matrix-table td { border: 1px solid #e2e8f0; padding: 6px 10px; }
+        .diff-add { background-color: #dcfce7; color: #166534; } /* 綠色：新增 */
+        .diff-del { background-color: #fee2e2; color: #991b1b; } /* 紅色：刪除 */
+        .diff-change { background-color: #fef9c3; color: #854d0e; } /* 黃色：變更 */
+    </style>
+</head>
+<body class="bg-gray-50 p-6">
+    <div class="max-w-full mx-auto">
+        <h1 class="text-2xl font-bold mb-6 text-gray-800">BOM 多批次智能比對工具 (矩陣模式)</h1>
+
+        <div class="bg-white p-5 rounded-xl shadow-sm mb-6 grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div>
+                <h2 class="font-bold text-gray-700 mb-2">1. 大前提：PCB 版號過濾</h2>
+                <label class="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" id="pcbStrict" checked class="w-4 h-4 text-blue-600">
+                    <span class="text-gray-700">圈 PCB (僅比對同版號檔案)</span>
+                </label>
+            </div>
+            <div>
+                <h2 class="font-bold text-gray-700 mb-2">2. 篩選比對階層 (Level)</h2>
+                <div class="flex flex-wrap gap-4" id="levelContainer">
+                    </div>
+            </div>
+        </div>
+
+        <div id="dropZone" class="drop-zone bg-white p-8 rounded-xl text-center cursor-pointer mb-6 hover:bg-gray-50 transition">
+            <p class="text-gray-500">拖曳多個 BOM 文字檔到這裡，或點擊選擇檔案</p>
+            <input type="file" id="fileInput" multiple class="hidden">
+        </div>
+
+        <div id="resultArea" class="hidden space-y-6">
+            <div class="flex justify-between items-center bg-blue-50 p-4 rounded-lg">
+                <div id="statusMsg" class="text-blue-800 font-medium">已載入檔案，請點擊右側按鈕開始比對</div>
+                <button id="runBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold">執行矩陣比對</button>
+            </div>
+            <div id="matrixOutput" class="bg-white rounded-xl shadow-sm overflow-x-auto p-4"></div>
+        </div>
+    </div>
+
+    <script>
+        const levelContainer = document.getElementById('levelContainer');
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const matrixOutput = document.getElementById('matrixOutput');
+        const resultArea = document.getElementById('resultArea');
+        const runBtn = document.getElementById('runBtn');
+
+        let bomFilesData = [];
+
+        // 初始化階層勾選
+        [1,2,3,4,5,6].forEach(l => {
+            const checked = (l >= 3) ? 'checked' : '';
+            levelContainer.innerHTML += `
+                <label class="inline-flex items-center cursor-pointer">
+                    <input type="checkbox" value="${l}" class="lvl-chk w-4 h-4" ${checked}>
+                    <span class="ml-1 text-sm">L${l}</span>
+                </label>`;
+        });
+
+        dropZone.onclick = () => fileInput.click();
+        fileInput.onchange = (e) => handleFiles(e.target.files);
+        
+        async function handleFiles(files) {
+            bomFilesData = [];
+            for (const file of files) {
+                const text = await file.text();
+                const parsed = parseBOMData(text, file.name);
+                bomFilesData.push(parsed);
+            }
+            resultArea.classList.remove('hidden');
+            alert(`已成功讀取 ${files.length} 個檔案`);
+        }
+
+        // 核心解析邏輯：處理點號、括號與階層
+        function parseBOMData(text, fileName) {
+            const lines = text.split(/\r?\n/);
+            const components = [];
+            let pcbVersion = "Unknown";
+
+            lines.forEach(line => {
+                // 抓取第一欄 Level
+                const levelMatch = line.match(/^(\d)\s+/);
+                if (!levelMatch) return;
+                const level = parseInt(levelMatch[1]);
+
+                // 拆分欄位 (假設以固定間隔或大量空格分隔)
+                const parts = line.trim().split(/\s{2,}/);
+                if (parts.length < 3) return;
+
+                const pn = parts[1]; // 第二欄料號
+                const qty = parseFloat(parts[2]) || 0;
+                const desc = parts[3] || "";
+                
+                // 處理最麻煩的位置編號 (Ref Des)
+                // 位置通常在最後一欄，用點號 (.) 分隔
+                let refDesRaw = parts[parts.length - 1] || "";
+                const refDesList = refDesRaw.split('.').map(s => s.trim()).filter(s => s !== "");
+
+                if (desc.includes("PCB") && !desc.includes("ASSY")) pcbVersion = pn;
+
+                components.push({ level, pn, qty, desc, refDesList });
+            });
+
+            return { fileName, pcbVersion, components };
+        }
+
+        runBtn.onclick = () => {
+            const selectedLevels = Array.from(document.querySelectorAll('.lvl-chk:checked')).map(el => parseInt(el.value));
+            generateMatrix(selectedLevels);
+        };
+
+        function generateMatrix(levels) {
+            if (bomFilesData.length === 0) return;
+
+            // 1. 建立全局零件清單 (以料號為 Key)
+            const allPNs = new Set();
+            bomFilesData.forEach(bom => {
+                bom.components.forEach(comp => {
+                    if (levels.includes(comp.level)) allPNs.add(comp.pn);
+                });
+            });
+
+            // 2. 繪製矩陣表格
+            let html = `<table class="matrix-table"><thead><tr>`;
+            html += `<th class="bg-gray-100">料號 (Part Number)</th>`;
+            html += `<th class="bg-gray-100">規格 (Description)</th>`;
+            bomFilesData.forEach(bom => html += `<th class="bg-gray-100 text-xs">${bom.fileName}<br><span class="text-blue-500">${bom.pcbVersion}</span></th>`);
+            html += `</tr></thead><tbody>`;
+
+            Array.from(allPNs).sort().forEach(pn => {
+                const sampleComp = bomFilesData.find(b => b.components.some(c => c.pn === pn))
+                                   ?.components.find(c => c.pn === pn);
+                
+                html += `<tr><td>${pn}</td><td class="text-xs text-gray-500">${sampleComp?.desc || ""}</td>`;
+                
+                bomFilesData.forEach(bom => {
+                    const target = bom.components.find(c => c.pn === pn);
+                    const qty = target ? target.qty : 0;
+                    const style = qty === 0 ? 'diff-del' : '';
+                    html += `<td class="${style} text-center font-mono">${qty}</td>`;
+                });
+                html += `</tr>`;
+            });
+
+            html += `</tbody></table>`;
+            matrixOutput.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
