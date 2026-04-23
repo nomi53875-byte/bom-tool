@@ -110,7 +110,7 @@ if len(uploaded_files) >= 2:
 
     result_df = pd.DataFrame(diff_data)
 
-    # 顏色渲染函數
+# 顏色渲染函數
     def color_status(val):
         color = 'black'
         if val == "🆕 新增": color = 'green'
@@ -119,7 +119,7 @@ if len(uploaded_files) >= 2:
         return f'color: {color}; font-weight: bold'
 
     st.subheader("📋 差異比對清單")
-    st.dataframe(result_df.style.applymap(color_status, subset=['變更差異']), use_container_width=True)
-
+    # 將 applymap 改為 map 即可修正錯誤
+    st.dataframe(result_df.style.map(color_status, subset=['變更差異']), use_container_width=True)
 elif uploaded_files:
     st.warning("請至少上傳 2 個檔案以執行比對。")
