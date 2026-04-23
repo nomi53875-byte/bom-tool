@@ -2,36 +2,31 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="BOM 深度比對工具", layout="wide")
-st.title("🔍 BOM 變更差異深度比對")
+st.set_page_config(page_title="BOM 工程差異分析工具", layout="wide")
+st.title("🛠️ BOM 工程異動分析 (ECN 邏輯版)")
 
 # --- 側邊欄設定 ---
 with st.sidebar:
     st.header("⚙️ 比對設定")
-    
-    # 修正點 1：階層選擇改為一列整齊排列
-    st.subheader("選擇比對階層 (Level)")
     selected_levels = []
+    st.subheader("選擇比對階層 (Level)")
     for i in range(1, 7):
-        # 預設勾選 3, 4 階
-        if st.checkbox(f"Level {i}", value=True if i in [3, 4] else False):
+        if st.checkbox(f"Level {i}", value=True if i in [3, 4, 5] else False):
             selected_levels.append(i)
-    
     st.divider()
-    st.info("💡 系統目前設定為：僅顯示有變更的項目")
+    st.caption("註：本工具優先以『位置(Ref Des)』為基準進行對齊比對。")
 
-# --- 核心處理函數 ---
-def parse_bom(file_bytes):
+def parse_bom_to_ref_map(file_bytes):
+    """將 BOM 解析為以 Ref Des 為 Key 的字典，方便位置對齊"""
     try:
         text = file_bytes.decode("big5")
     except:
         text = file_bytes.decode("utf-8", errors="ignore")
     
     lines = text.splitlines()
-    data = []
-    pcb_pn = "Unknown"
+    ref_map = {} # { "C1": {"PN": "...", "Desc": "...", "Level": 3}, ... }
+    
     current_item = None
-
     for line in lines:
         match = re.match(r'^(\d)\s+', line)
         if match:
@@ -39,89 +34,82 @@ def parse_bom(file_bytes):
             cols = re.split(r'\s{2,}', line.strip())
             if len(cols) >= 2:
                 pn = cols[1]
-                qty = cols[2] if len(cols) > 2 else "0"
+                qty = float(cols[2]) if len(cols) > 2 and cols[2].replace('.','',1).isdigit() else 0
                 desc = cols[3] if len(cols) > 3 else ""
                 ref_raw = cols[-1] if len(cols) > 4 else ""
-                # 處理位置編號：移除括號、點號拆分
-                refs = sorted([re.sub(r'\(.*?\)\d*', '', r).strip() for r in ref_raw.split('.') if r.strip()])
                 
-                if "PCB" in desc.upper() and "ASSY" not in desc.upper(): pcb_pn = pn
+                # 僅處理數量大於 0 的有效料號，過濾雜訊
+                if qty <= 0: continue
                 
-                current_item = {"Level": level, "PN": pn, "Qty": qty, "Desc": desc, "Refs": set(refs)}
-                data.append(current_item)
+                # 拆解位置
+                refs = [re.sub(r'\(.*?\)\d*', '', r).strip() for r in ref_raw.split('.') if r.strip()]
+                
+                current_item = {"Level": level, "PN": pn, "Desc": desc}
+                for r in refs:
+                    ref_map[r] = current_item
         elif current_item and line.startswith(" " * 10):
             extra_refs = [re.sub(r'\(.*?\)\d*', '', r).strip() for r in line.strip().split('.') if r.strip()]
-            current_item["Refs"].update(extra_refs)
-
-    df = pd.DataFrame(data)
-    if not df.empty:
-        df["Refs"] = df["Refs"].apply(lambda x: sorted(list(x)))
-    return df, pcb_pn
+            for r in extra_refs:
+                ref_map[r] = current_item
+    return ref_map
 
 # --- 檔案上傳 ---
-uploaded_files = st.file_uploader("請上傳兩個 BOM 進行對照比對", accept_multiple_files=True)
+uploaded_files = st.file_uploader("請上傳兩個 BOM 檔案", accept_multiple_files=True)
 
 if len(uploaded_files) >= 2:
-    df_a, pcb_a = parse_bom(uploaded_files[0].getvalue())
-    df_b, pcb_b = parse_bom(uploaded_files[1].getvalue())
+    map_a = parse_bom_to_ref_map(uploaded_files[0].getvalue())
+    map_b = parse_bom_to_ref_map(uploaded_files[1].getvalue())
 
     st.success(f"比對目標：[A] {uploaded_files[0].name} ↔ [B] {uploaded_files[1].name}")
 
-    # 篩選階層
-    df_a = df_a[df_a['Level'].isin(selected_levels)]
-    df_b = df_b[df_b['Level'].isin(selected_levels)]
-
-    # 合併兩者料號清單
-    all_pns = pd.concat([df_a[['PN', 'Desc', 'Level']], df_b[['PN', 'Desc', 'Level']]]).drop_duplicates('PN')
+    # 取得所有出現過的位置 (聯集)
+    all_refs = sorted(list(set(map_a.keys()) | set(map_b.keys())), key=lambda x: (re.sub(r'\d+', '', x), int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0))
 
     diff_data = []
-    for _, row in all_pns.iterrows():
-        pn = row['PN']
-        item_a = df_a[df_a['PN'] == pn].to_dict('records')
-        item_b = df_b[df_b['PN'] == pn].to_dict('records')
+    # 這裡實施「舊工具」的成對比對邏輯
+    for ref in all_refs:
+        item_a = map_a.get(ref)
+        item_b = map_b.get(ref)
         
-        item_a = item_a[0] if item_a else None
-        item_b = item_b[0] if item_b else None
-        
-        qty_a = item_a['Qty'] if item_a else "0"
-        qty_b = item_b['Qty'] if item_b else "0"
-        refs_a = item_a['Refs'] if item_a else []
-        refs_b = item_b['Refs'] if item_b else []
-        
-        # 判斷變更狀態
+        # 篩選階層：只要其中一邊符合階層就列入考慮
+        lvl_a = item_a['Level'] if item_a else None
+        lvl_b = item_b['Level'] if item_b else None
+        if (lvl_a not in selected_levels) and (lvl_b not in selected_levels):
+            continue
+
         status = ""
-        if not item_a: status = "🆕 新增"
-        elif not item_b: status = "❌ 刪除"
-        elif qty_a != qty_b or refs_a != refs_b: status = "⚠️ 變更"
-        else: continue # 修正點 2：無差異則跳過，不加入清單
+        if not item_a: status = "🆕 位置新增"
+        elif not item_b: status = "❌ 位置刪除"
+        elif item_a['PN'] != item_b['PN']: status = "🔄 料號變更"
+        else: continue # 無差異
 
         diff_data.append({
-            "變更差異": status,
-            "Level": row['Level'],
-            "料號": pn,
-            "規格描述": row['Desc'],
-            "A數量": qty_a,
-            "B數量": qty_b,
-            "A位置": ",".join(refs_a),
-            "B位置": ",".join(refs_b)
+            "變更項目": status,
+            "位置": ref,
+            "A料號 (舊)": item_a['PN'] if item_a else "---",
+            "B料號 (新)": item_b['PN'] if item_b else "---",
+            "A規格": item_a['Desc'] if item_a else "",
+            "B規格": item_b['Desc'] if item_b else "",
+            "階層": lvl_b if lvl_b else lvl_a
         })
 
     if diff_data:
-        result_df = pd.DataFrame(diff_data)
+        df_result = pd.DataFrame(diff_data)
+        
+        # 為了讓結果像舊工具一樣「成對且精簡」，我們將相同變更內容的位置合併
+        # 相同 (狀態, A料號, B料號) 的合併在一起
+        summary = df_result.groupby(["變更項目", "A料號 (舊)", "B料號 (新)", "A規格", "B規格", "階層"])["位置"].apply(lambda x: ".".join(x)).reset_index()
+        
+        # 重新排列欄位順序，模仿舊工具
+        summary = summary[["變更項目", "位置", "A料號 (舊)", "B料號 (新)", "A規格", "B規格", "階層"]]
 
-        # 顏色渲染
         def color_status(val):
-            color = 'black'
-            if val == "🆕 新增": color = '#28a745' # 綠
-            elif val == "❌ 刪除": color = '#dc3545' # 紅
-            elif val == "⚠️ 變更": color = '#fd7e14' # 橘
-            return f'color: {color}; font-weight: bold'
+            if val == "🔄 料號變更": return 'color: #fd7e14; font-weight: bold'
+            if val == "🆕 位置新增": return 'color: #28a745; font-weight: bold'
+            if val == "❌ 位置刪除": return 'color: #dc3545; font-weight: bold'
+            return ''
 
-        st.subheader("📋 差異比對清單 (僅顯示變更項)")
-        st.dataframe(result_df.style.map(color_status, subset=['變更差異']), use_container_width=True)
+        st.subheader("📋 異動分析報告 (按位置對齊)")
+        st.dataframe(summary.style.map(color_status, subset=['變更項目']), use_container_width=True)
     else:
-        st.balloons()
-        st.success("✨ 比對完成：兩個 BOM 在選定階層內完全一致，無任何差異！")
-
-elif uploaded_files:
-    st.warning("請至少上傳 2 個檔案以執行比對。")
+        st.success("✅ 兩份 BOM 在選定階層內之『位置與料號對應』完全一致。")
